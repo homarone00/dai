@@ -1,0 +1,8 @@
+pettingzoo~=1.24.3
+torch~=2.6.0+cu126
+numpy~=2.2.2
+pandas~=2.2.3
+tqdm~=4.67.1
+gymnasium~=1.0.0
+torchrl~=0.7.1
+tensordict~=0.7.1
