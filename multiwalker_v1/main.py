@@ -1,5 +1,6 @@
 #IMPORTS
 from pettingzoo.sisl import multiwalker_v9
+from pettingzoo.utils.env import AECEnv
 import numpy as np
 import os
 
@@ -8,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 
-
+from multiwalker_v1.utils import ActorNet, CriticNet
 #MY IMPORTS
 from utils import (ActorNet, CriticNet, ReplayBuffer, soft_update, train_actor, train_critic,
                    save_models_and_optimizers, load_models_and_optimizers, OUNoise)
@@ -25,9 +26,19 @@ RENDER = True
 FORWARD_REWARD = 10.0
 TERMINATE_REWARD = -200.0
 FALL_REWARD  = -50.0
+WARMUP = 20000 #number of episodes only used to fill the ReplayMemory, without updates
+BUFFER_CAPACITY = 100_000   #replaybuffer
+BATCH_SIZE = 2048           #replaybuffer
+SAVE_FREQ = 100 #frequency of the weight saves
+WEIGHTS_ABS_PATH = 'C:\\Users\\omarc\\PycharmProjects\\prova_dai\\multiwalker_v1\\models'
+#=======================================================================================================
+#prints and checks
+print('BE CAREFUL!!! THIS SCRIP WILL EVENTUALLY ERASE ALL THE CONTENTS OF THE WEIGHTS_ABS_PATH DIRECTORY')
+assert os.path.isdir(WEIGHTS_ABS_PATH), 'provide a valid abs path to an empty directory'
+print(f'directory: {WEIGHTS_ABS_PATH} <-- will be erased!!!!!!!!!!!!')
 #=======================================================================================================
 #STARTING THE ENVIRONMENT
-env = multiwalker_v9.env(render_mode = 'human' if RENDER else None,  #TODO: use a parallel env
+env:AECEnv = multiwalker_v9.env(render_mode = 'human' if RENDER else None,  #TODO: use a parallel env
                          n_walkers=NUM_WALKERS,
                          position_noise=1e-3,
                          angle_noise=1e-3,
@@ -43,7 +54,7 @@ env = multiwalker_v9.env(render_mode = 'human' if RENDER else None,  #TODO: use 
 #AGENTS, NETS, OPTIMIZERS AND NOISE
 all_agents = [f'walker_{i}' for i in range(NUM_WALKERS)]
 
-all_nets = {
+all_nets: dict[str, dict[str, ActorNet | CriticNet]] = {
     agent: {
         'critic_net': CriticNet(OBSERVATION_SIZE, ACTION_SIZE),
         'critic_net_target': CriticNet(OBSERVATION_SIZE, ACTION_SIZE),
@@ -82,14 +93,17 @@ for agent in all_agents:
 
 ou_noise = {agent: OUNoise(ACTION_SIZE) for agent in all_agents}
 #=======================================================================================================
-memory = ReplayBuffer(100000,NUM_WALKERS,2048)
+memory = ReplayBuffer(BUFFER_CAPACITY,NUM_WALKERS,BATCH_SIZE)
 #=======================================================================================================
 
 for episode in range(START_EPISODE + 1,N_EPISODES):
+    #RESETTING THINGS
     episode_rewards = {agent: 0.0 for agent in all_agents}
-    env.reset(seed=42)
-
-    for agent in env.agent_iter():
+    env.reset()
+    for agent in all_agents:
+        ou_noise[agent].reset_noise()
+    #AGENT ITERATION
+    for agent in env.agent_iter(): #TODO: MAKE IT PARALLEL!
         observation, reward, termination, truncation, info = env.last()
         reward/=500 #normalization of the reward for stability (could be wrong)
         '''
@@ -108,29 +122,29 @@ for episode in range(START_EPISODE + 1,N_EPISODES):
         episode_rewards[agent]+=reward
         env.step(action)
         if termination or truncation:
-            action = np.zeros(ACTION_SIZE) #zeros action, since i have to feed the networks something. It doesnt matter
+            action = np.zeros(ACTION_SIZE) #zeros action, since i have to feed something to the networks. It doesnt matter
                                            #since termination actions aren't used in the bellman update.
         if not (termination or truncation):
             new_observation, _, _, _, _ = env.last() #get new observation
         else:
-            new_observation = observation
-        memory.push(agent,observation,new_observation,action,reward,termination, truncation, info)
-        if len(memory) > 20000:
+            new_observation = torch.zeros(OBSERVATION_SIZE) #zeros observation. not used by the update.
+        memory.push(agent,observation,new_observation,action,reward,termination, truncation, info) #save for future use
 
-            batch = memory.sample(agent)  # Get batch
-            train_critic(batch, all_nets[agent], optims[agent]['critic_net'],running_loss,schedulers[agent])  # Train Critic
-            if episode % 4 == 0:
-                train_actor(batch, all_nets[agent], optims[agent]['actor_net'],schedulers[agent])  # Train Actor
-                soft_update(all_nets[agent]['actor_net_target'], all_nets[agent]['actor_net'])  # Update target Actor
-            soft_update(all_nets[agent]['critic_net_target'], all_nets[agent]['critic_net'])  # Update target Critic
-    if(episode +1 )%1 == 0 and running_loss[1]!=0.0:
-        print(running_loss[0])
+        #UPDATE PART
+        if len(memory) > WARMUP:
+            batch = memory.sample(agent)
+            #CRITIC PART
+            train_critic(batch, all_nets[agent], optims[agent]['critic_net'],schedulers[agent])
+            soft_update(all_nets[agent]['critic_net_target'], all_nets[agent]['critic_net'])
+
+            #ACTOR PART
+            train_actor(batch, all_nets[agent], optims[agent]['actor_net'],schedulers[agent])
+            soft_update(all_nets[agent]['actor_net_target'], all_nets[agent]['actor_net'])
 
 
-
-    if (episode + 1)%100 == 0:
-        for file in os.listdir('C:\\Users\\omarc\\PycharmProjects\\prova_dai\\multiwalker_v1\\models'):
-            os.remove(os.path.join('C:\\Users\\omarc\\PycharmProjects\\prova_dai\\multiwalker_v1\\models',file))
+    if (episode + 1)% SAVE_FREQ == 0: #saving the checkpoints
+        for file in os.listdir(WEIGHTS_ABS_PATH):
+            os.remove(os.path.join(WEIGHTS_ABS_PATH,file))
         save_models_and_optimizers(all_nets, optims, episode)
 
     env.close()
