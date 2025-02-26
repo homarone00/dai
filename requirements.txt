@@ -6,3 +6,5 @@ tqdm~=4.67.1
 gymnasium~=1.0.0
 torchrl~=0.7.1
 tensordict~=0.7.1
+pygame~=2.6.1
+Box2D~=2.3.10

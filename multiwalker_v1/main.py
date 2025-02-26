@@ -16,26 +16,28 @@ from utils import (ActorNet, CriticNet, ReplayBuffer, soft_update, train_actor, 
 
 #=======================================================================================================
 #HYPERPARAMETERS
-NUM_WALKERS = 2
+NUM_WALKERS = 3
 N_EPISODES = 20000
 OBSERVATION_SIZE = 31
 ACTION_SIZE = 4
-START_EPISODE = 4599
+START_EPISODE = 799 ############################################
 LOAD_CHECKPOINT = (START_EPISODE != 0)
 RENDER = True
 FORWARD_REWARD = 10.0
-TERMINATE_REWARD = -200.0
+TERMINATE_REWARD = 0.0
 FALL_REWARD  = -50.0
-WARMUP = 20000 #number of episodes only used to fill the ReplayMemory, without updates
+WARMUP = 5000 #number of episodes only used to fill the ReplayMemory, without updates
 BUFFER_CAPACITY = 100_000   #replaybuffer
-BATCH_SIZE = 2048           #replaybuffer
+BATCH_SIZE = 512           #replaybuffer
 SAVE_FREQ = 100 #frequency of the weight saves
-WEIGHTS_ABS_PATH = 'C:\\Users\\omarc\\PycharmProjects\\prova_dai\\multiwalker_v1\\models'
+WEIGHTS_ABS_PATH = '/home/omarc/PycharmProjects/dai/multiwalker_v1/models'
+
 #=======================================================================================================
 #prints and checks
-print('BE CAREFUL!!! THIS SCRIP WILL EVENTUALLY ERASE ALL THE CONTENTS OF THE WEIGHTS_ABS_PATH DIRECTORY')
+print('BE CAREFUL!!! THIS SCRIPT WILL EVENTUALLY ERASE ALL THE CONTENTS OF THE WEIGHTS_ABS_PATH DIRECTORY')
 assert os.path.isdir(WEIGHTS_ABS_PATH), 'provide a valid abs path to an empty directory'
 print(f'directory: {WEIGHTS_ABS_PATH} <-- will be erased!!!!!!!!!!!!')
+is_training = 0
 #=======================================================================================================
 #STARTING THE ENVIRONMENT
 env:AECEnv = multiwalker_v9.env(render_mode = 'human' if RENDER else None,  #TODO: use a parallel env
@@ -75,12 +77,12 @@ optims = {
 schedulers = { #should half the lr after 138629 steps
     agent: {
         'critic_net': torch.optim.lr_scheduler.ExponentialLR(optims[agent]['critic_net'], gamma=0.999995),
-        'actor_net': torch.optim.lr_scheduler.ExponentialLR(optims[agent]['actor_net'], gamma=0.999995,)
+        'actor_net': torch.optim.lr_scheduler.ExponentialLR(optims[agent]['actor_net'], gamma=0.999995)
     }
     for agent in all_agents
 }
 if LOAD_CHECKPOINT:
-    load_models_and_optimizers(all_nets,optims,START_EPISODE)
+    load_models_and_optimizers(all_nets,optims,START_EPISODE,WEIGHTS_ABS_PATH)
 
 #Setting all nets into the right mode
 for agent in all_agents:
@@ -94,6 +96,18 @@ for agent in all_agents:
 ou_noise = {agent: OUNoise(ACTION_SIZE) for agent in all_agents}
 #=======================================================================================================
 memory = ReplayBuffer(BUFFER_CAPACITY,NUM_WALKERS,BATCH_SIZE)
+
+cache = {
+    agent: {
+        'observation': None,
+        'action':None,
+        'reward':None,
+        'termination':None,
+        'truncation':None,
+        'info':None
+    }
+    for agent in all_agents
+}
 #=======================================================================================================
 
 for episode in range(START_EPISODE + 1,N_EPISODES):
@@ -115,36 +129,58 @@ for episode in range(START_EPISODE + 1,N_EPISODES):
             action = None
         else:
             with torch.no_grad():
-                #action = env.action_space(agent).sample() #old random policy provided by the example
-                action = all_nets[agent]['actor_net'](torch.tensor(observation, dtype=torch.float32)).cpu().numpy()
-                action += ou_noise[agent].sample()
-                action = np.clip(action, -1, 1)
+                if len(memory) < WARMUP and START_EPISODE == 0:
+                    action = env.action_space(agent).sample() #old random policy provided by the example
+                else:
+                    action = all_nets[agent]['actor_net'](torch.tensor(observation, dtype=torch.float32)).cpu().numpy()
+                    action += ou_noise[agent].sample()
+                    action = np.clip(action, -1, 1)
         episode_rewards[agent]+=reward
         env.step(action)
         if termination or truncation:
             action = np.zeros(ACTION_SIZE) #zeros action, since i have to feed something to the networks. It doesnt matter
                                            #since termination actions aren't used in the bellman update.
-        if not (termination or truncation):
-            new_observation, _, _, _, _ = env.last() #get new observation
-        else:
-            new_observation = torch.zeros(OBSERVATION_SIZE) #zeros observation. not used by the update.
-        memory.push(agent,observation,new_observation,action,reward,termination, truncation, info) #save for future use
+        if observation is None:
+            observation = np.zeros(OBSERVATION_SIZE)
+        if cache[agent]['observation'] is not None:
+            memory.push(
+                agent,
+                cache[agent]['observation'],
+                observation,
+                cache[agent]['action'],
+                cache[agent]['reward'],
+                cache[agent]['termination'],
+                cache[agent]['truncation'],
+                cache[agent]['info'])
+        cache[agent]['observation'] = observation
+        cache[agent]['action'] = action
+        cache[agent]['reward'] = reward
+        cache[agent]['termination'] = termination
+        cache[agent]['truncation'] = truncation
+        cache[agent]['info'] = info
+        batch = None
 
         #UPDATE PART
         if len(memory) > WARMUP:
             batch = memory.sample(agent)
+            if is_training == 0:
+                is_training = 1
+                print('starting training')
+
             #CRITIC PART
             train_critic(batch, all_nets[agent], optims[agent]['critic_net'],schedulers[agent])
             soft_update(all_nets[agent]['critic_net_target'], all_nets[agent]['critic_net'])
 
+        if len(memory) > 2 * WARMUP:
             #ACTOR PART
             train_actor(batch, all_nets[agent], optims[agent]['actor_net'],schedulers[agent])
             soft_update(all_nets[agent]['actor_net_target'], all_nets[agent]['actor_net'])
 
 
     if (episode + 1)% SAVE_FREQ == 0: #saving the checkpoints
+        print(f'saving model:{episode}')
         for file in os.listdir(WEIGHTS_ABS_PATH):
             os.remove(os.path.join(WEIGHTS_ABS_PATH,file))
-        save_models_and_optimizers(all_nets, optims, episode)
-
+        save_models_and_optimizers(all_nets, optims, episode,path=WEIGHTS_ABS_PATH)
+    print(str(episode) + ' -->' + str(episode_rewards))
     env.close()

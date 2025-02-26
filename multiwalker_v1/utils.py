@@ -7,43 +7,43 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 #TODO: remove all the .cuda() and replace them with .to(device)
 class ActorNet(nn.Module):
     def __init__(self,observation_size,action_size):
         super(ActorNet, self).__init__()
         self.net = nn.Sequential(
-            nn.Linear(observation_size,512),
-            nn.LayerNorm(512), #useful...maybe...
+            nn.Linear(observation_size,128),
             nn.ReLU(),
-            nn.Linear(512,512),
+            nn.Linear(128,128),
             nn.ReLU(),
-            nn.Linear(512,action_size),
+            nn.Linear(128,action_size,bias=False),
             nn.Tanh() #mandatory since the action space is bounded
-        ).cuda()
-        self.apply(init_weights_kaiming) #better stability
+        ).to(DEVICE)
+        #self.apply(init_weights_kaiming) #better stability
 
     def forward(self,observation:torch.Tensor):
-        action =  self.net(observation.cuda())
+        action =  self.net(observation.to(DEVICE))
         return action
 
 class CriticNet(nn.Module):
     def __init__(self,observation_size,action_size):
         super(CriticNet, self).__init__()
         self.net = nn.Sequential(
-            nn.Linear(observation_size + action_size,512),
+            nn.Linear(observation_size + action_size,128),
             nn.ReLU(),
             nn.Dropout(0),
-            nn.Linear(512,512),
+            nn.Linear(128,128),
             nn.ReLU(),
             nn.Dropout(0),
-            nn.Linear(512,1),
+            nn.Linear(128,1),
             nn.Tanh()
-        ).cuda()
+        ).to(DEVICE)
         self.apply(init_weights_kaiming) #better stability
 
     def forward(self,action:torch.Tensor,observation:torch.Tensor):
-        q =  self.net(torch.cat((action.cuda(),observation.cuda()),dim=1).cuda())
+        q =  self.net(torch.cat((action.to(DEVICE),observation.to(DEVICE)),dim=1).to(DEVICE))
         return q
 
 
@@ -88,14 +88,14 @@ def soft_update(target_net, source_net, tau=0.005):
     for target_param, source_param in zip(target_net.parameters(), source_net.parameters()):
         target_param.data.copy_(tau * source_param.data + (1.0 - tau) * target_param.data)
 
-def train_critic(batch, nets, optimizer,schedulers,gamma=0.99):
+def train_critic(batch, nets, optimizer,schedulers,gamma=0.95):
     observation, new_observation, action, reward, termination, truncation,info = batch.values()
 
     #everything on .cuda()...so bad...I should use .to(device)
-    observation = observation.cuda()
-    new_observation = new_observation.cuda()
-    reward = reward.unsqueeze(1).cuda()
-    stop = (termination | truncation).float().unsqueeze(1).cuda()
+    observation = observation.to(DEVICE)
+    new_observation = new_observation.to(DEVICE)
+    reward = reward.unsqueeze(1).to(DEVICE)
+    stop = (termination | truncation).float().unsqueeze(1).to(DEVICE)
 
     for i in range(1):
         with torch.no_grad():
@@ -110,7 +110,7 @@ def train_critic(batch, nets, optimizer,schedulers,gamma=0.99):
         critic_loss = F.mse_loss(q_values, q)
 
         optimizer.zero_grad()
-        torch.nn.utils.clip_grad_norm_(nets['critic_net'].parameters(), max_norm=1.0) #fear of exp. gradients
+        torch.nn.utils.clip_grad_norm_(nets['critic_net'].parameters(), max_norm=0.5) #fear of exp. gradients
         critic_loss.backward()
         optimizer.step()
         schedulers['critic_net'].step()
@@ -123,14 +123,16 @@ def train_actor(batch, nets, optimizer,schedulers):
     # Compute actor loss
     for i in range(1):
         # Update actor
+        nets['critic_net'].eval()
         action = nets['actor_net'](observation)  #get action
         actor_loss = -nets['critic_net'](action,observation).mean()
         optimizer.zero_grad()
 
-        torch.nn.utils.clip_grad_norm_(nets['actor_net'].parameters(), max_norm=1.0) # more fear of exp. gradients
+        torch.nn.utils.clip_grad_norm_(nets['actor_net'].parameters(), max_norm=0.5) # more fear of exp. gradients
         actor_loss.backward()
         optimizer.step()
         schedulers['actor_net'].step()
+        nets['critic_net'].train()
 
 def init_weights_kaiming(m):
     if isinstance(m, nn.Linear):
@@ -144,28 +146,28 @@ def save_models_and_optimizers(all_nets, optims, episode, path):
 
     for agent, nets in all_nets.items():
         #Save nets
-        torch.save(nets['actor_net'].state_dict(), f"{path}{agent}_actor_{episode}.pth")
-        torch.save(nets['critic_net'].state_dict(), f"{path}{agent}_critic_{episode}.pth")
-        torch.save(nets['actor_net_target'].state_dict(), f"{path}{agent}_actor_target_{episode}.pth")
-        torch.save(nets['critic_net_target'].state_dict(), f"{path}{agent}_critic_target_{episode}.pth")
+        torch.save(nets['actor_net'].state_dict(), f"{path}/{agent}_actor_{episode}.pth")
+        torch.save(nets['critic_net'].state_dict(), f"{path}/{agent}_critic_{episode}.pth")
+        torch.save(nets['actor_net_target'].state_dict(), f"{path}/{agent}_actor_target_{episode}.pth")
+        torch.save(nets['critic_net_target'].state_dict(), f"{path}/{agent}_critic_target_{episode}.pth")
 
         #Save optims
-        torch.save(optims[agent]['actor_net'].state_dict(), f"{path}{agent}_actor_optim_{episode}.pth")
-        torch.save(optims[agent]['critic_net'].state_dict(), f"{path}{agent}_critic_optim_{episode}.pth")
+        torch.save(optims[agent]['actor_net'].state_dict(), f"{path}/{agent}_actor_optim_{episode}.pth")
+        torch.save(optims[agent]['critic_net'].state_dict(), f"{path}/{agent}_critic_optim_{episode}.pth")
 
     print(f"Saved models and optimizers at episode {episode}! :-)")
 
 def load_models_and_optimizers(all_nets, optims, episode, path):
     for agent, nets in all_nets.items():
         # Load networks
-        nets['actor_net'].load_state_dict(torch.load(f"{path}{agent}_actor_{episode}.pth"))
-        nets['critic_net'].load_state_dict(torch.load(f"{path}{agent}_critic_{episode}.pth"))
-        nets['actor_net_target'].load_state_dict(torch.load(f"{path}{agent}_actor_target_{episode}.pth"))
-        nets['critic_net_target'].load_state_dict(torch.load(f"{path}{agent}_critic_target_{episode}.pth"))
+        nets['actor_net'].load_state_dict(torch.load(f"{path}/{agent}_actor_{episode}.pth",map_location=DEVICE))
+        nets['critic_net'].load_state_dict(torch.load(f"{path}/{agent}_critic_{episode}.pth",map_location=DEVICE))
+        nets['actor_net_target'].load_state_dict(torch.load(f"{path}/{agent}_actor_target_{episode}.pth",map_location=DEVICE))
+        nets['critic_net_target'].load_state_dict(torch.load(f"{path}/{agent}_critic_target_{episode}.pth",map_location=DEVICE))
 
         # Load optimizers
-        optims[agent]['actor_net'].load_state_dict(torch.load(f"{path}{agent}_actor_optim_{episode}.pth"))
-        optims[agent]['critic_net'].load_state_dict(torch.load(f"{path}{agent}_critic_optim_{episode}.pth"))
+        optims[agent]['actor_net'].load_state_dict(torch.load(f"{path}/{agent}_actor_optim_{episode}.pth",map_location=DEVICE))
+        optims[agent]['critic_net'].load_state_dict(torch.load(f"{path}/{agent}_critic_optim_{episode}.pth",map_location=DEVICE))
 
     print(f"Loaded models & optimizers from episode {episode}! :-)")
 
