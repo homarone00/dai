@@ -43,7 +43,7 @@ class CriticNet(nn.Module):
         self.apply(init_weights_kaiming) #better stability
 
     def forward(self,action:torch.Tensor,observation:torch.Tensor):
-        q =  self.net(torch.cat((action.to(DEVICE),observation.to(DEVICE)),dim=1).to(DEVICE))
+        q =  self.net(torch.cat((action.to(DEVICE),observation.to(DEVICE)),dim=1))
         return q
 
 
@@ -88,14 +88,14 @@ def soft_update(target_net, source_net, tau=0.005):
     for target_param, source_param in zip(target_net.parameters(), source_net.parameters()):
         target_param.data.copy_(tau * source_param.data + (1.0 - tau) * target_param.data)
 
-def train_critic(batch, nets, optimizer,schedulers,gamma=0.95):
+def train_critic(batch, nets, optimizer,schedulers,gamma=0.99):
     observation, new_observation, action, reward, termination, truncation,info = batch.values()
 
     #everything on .cuda()...so bad...I should use .to(device)
-    observation = observation.to(DEVICE)
-    new_observation = new_observation.to(DEVICE)
-    reward = reward.unsqueeze(1).to(DEVICE)
-    stop = (termination | truncation).float().unsqueeze(1).to(DEVICE)
+    observation = observation.pin_memory().to(DEVICE)
+    new_observation = new_observation.pin_memory().to(DEVICE)
+    reward = reward.unsqueeze(1).pin_memory().to(DEVICE)
+    stop = (termination | truncation).float().unsqueeze(1).pin_memory().to(DEVICE)
 
     for i in range(1):
         with torch.no_grad():
@@ -113,7 +113,6 @@ def train_critic(batch, nets, optimizer,schedulers,gamma=0.95):
         torch.nn.utils.clip_grad_norm_(nets['critic_net'].parameters(), max_norm=0.5) #fear of exp. gradients
         critic_loss.backward()
         optimizer.step()
-        schedulers['critic_net'].step()
 
 
 
@@ -131,7 +130,6 @@ def train_actor(batch, nets, optimizer,schedulers):
         torch.nn.utils.clip_grad_norm_(nets['actor_net'].parameters(), max_norm=0.5) # more fear of exp. gradients
         actor_loss.backward()
         optimizer.step()
-        schedulers['actor_net'].step()
         nets['critic_net'].train()
 
 def init_weights_kaiming(m):
@@ -172,7 +170,7 @@ def load_models_and_optimizers(all_nets, optims, episode, path):
     print(f"Loaded models & optimizers from episode {episode}! :-)")
 
 class OUNoise: #i tried both gaussian and ou. literature says that ou is better
-    def __init__(self, action_dim, mu=0.0, theta=0.10, sigma=0.2):
+    def __init__(self, action_dim, mu=0.0, theta=0.20, sigma=0.2):
         self.action_dim = action_dim
         self.mu = mu            #mean
         self.theta = theta
