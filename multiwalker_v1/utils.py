@@ -21,7 +21,7 @@ class ActorNet(nn.Module):
             nn.Linear(128,action_size,bias=False),
             nn.Tanh() #mandatory since the action space is bounded
         ).to(DEVICE)
-        #self.apply(init_weights_kaiming) #better stability
+        self.apply(init_weights_kaiming) #better stability
 
     def forward(self,observation:torch.Tensor):
         action =  self.net(observation.to(DEVICE))
@@ -37,8 +37,7 @@ class CriticNet(nn.Module):
             nn.Linear(128,128),
             nn.ReLU(),
             nn.Dropout(0),
-            nn.Linear(128,1),
-            nn.Tanh()
+            nn.Linear(128,1)
         ).to(DEVICE)
         self.apply(init_weights_kaiming) #better stability
 
@@ -88,7 +87,7 @@ def soft_update(target_net, source_net, tau=0.005):
     for target_param, source_param in zip(target_net.parameters(), source_net.parameters()):
         target_param.data.copy_(tau * source_param.data + (1.0 - tau) * target_param.data)
 
-def train_critic(batch, nets, optimizer,schedulers,gamma=0.99):
+def train_critic(batch, nets, optimizer,schedulers,gamma=0.999):
     observation, new_observation, action, reward, termination, truncation,info = batch.values()
 
     #everything on .cuda()...so bad...I should use .to(device)
@@ -110,27 +109,40 @@ def train_critic(batch, nets, optimizer,schedulers,gamma=0.99):
         critic_loss = F.mse_loss(q_values, q)
 
         optimizer.zero_grad()
-        torch.nn.utils.clip_grad_norm_(nets['critic_net'].parameters(), max_norm=0.5) #fear of exp. gradients
+        torch.nn.utils.clip_grad_norm_(nets['critic_net'].parameters(), max_norm=1.0) #fear of exp. gradients
         critic_loss.backward()
         optimizer.step()
 
 
 
+
 def train_actor(batch, nets, optimizer,schedulers):
-    observation,_, _,_,_, _, _ = batch.values()
+    observation, _, _, _, termination, _, _ = batch.values()
 
-    # Compute actor loss
-    for i in range(1):
-        # Update actor
-        nets['critic_net'].eval()
-        action = nets['actor_net'](observation)  #get action
-        actor_loss = -nets['critic_net'](action,observation).mean()
-        optimizer.zero_grad()
+    # Move data to the correct device
+    observation = observation.to(DEVICE)
+    termination = termination.to(DEVICE)  # Convert to tensor for filtering
 
-        torch.nn.utils.clip_grad_norm_(nets['actor_net'].parameters(), max_norm=0.5) # more fear of exp. gradients
-        actor_loss.backward()
-        optimizer.step()
-        nets['critic_net'].train()
+    # Mask out termination states
+    valid_mask = ~termination  # True for non-terminal states
+
+    if valid_mask.sum().item() == 0:  # If no valid states, skip training
+        return  
+
+    # Compute actor loss only for valid (non-terminal) states
+    nets['critic_net'].eval()
+    action = nets['actor_net'](observation)  
+    q_values = nets['critic_net'](action, observation)
+
+    # Only keep losses for valid states
+    actor_loss = -q_values[valid_mask].mean()
+
+    optimizer.zero_grad()
+    torch.nn.utils.clip_grad_norm_(nets['actor_net'].parameters(), max_norm=1.0)
+    actor_loss.backward()
+    optimizer.step()
+    nets['critic_net'].train()
+
 
 def init_weights_kaiming(m):
     if isinstance(m, nn.Linear):
@@ -164,13 +176,13 @@ def load_models_and_optimizers(all_nets, optims, episode, path):
         nets['critic_net_target'].load_state_dict(torch.load(f"{path}/{agent}_critic_target_{episode}.pth",map_location=DEVICE))
 
         # Load optimizers
-        optims[agent]['actor_net'].load_state_dict(torch.load(f"{path}/{agent}_actor_optim_{episode}.pth",map_location=DEVICE))
-        optims[agent]['critic_net'].load_state_dict(torch.load(f"{path}/{agent}_critic_optim_{episode}.pth",map_location=DEVICE))
+        #optims[agent]['actor_net'].load_state_dict(torch.load(f"{path}/{agent}_actor_optim_{episode}.pth",map_location=DEVICE))
+        #optims[agent]['critic_net'].load_state_dict(torch.load(f"{path}/{agent}_critic_optim_{episode}.pth",map_location=DEVICE))
 
     print(f"Loaded models & optimizers from episode {episode}! :-)")
 
 class OUNoise: #i tried both gaussian and ou. literature says that ou is better
-    def __init__(self, action_dim, mu=0.0, theta=0.20, sigma=0.2):
+    def __init__(self, action_dim, mu=0.0, theta=0.10, sigma=0.2):
         self.action_dim = action_dim
         self.mu = mu            #mean
         self.theta = theta

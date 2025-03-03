@@ -20,12 +20,12 @@ NUM_WALKERS = 3
 N_EPISODES = 20000
 OBSERVATION_SIZE = 31
 ACTION_SIZE = 4
-START_EPISODE = 799 ############################################
+START_EPISODE = 0 ############################################
 LOAD_CHECKPOINT = (START_EPISODE != 0)
 RENDER = False
 FORWARD_REWARD = 1.0
-TERMINATE_REWARD = -100.0
-FALL_REWARD  = -10.0
+TERMINATE_REWARD = -20.0
+FALL_REWARD  = -20.0
 WARMUP = 5000 #number of episodes only used to fill the ReplayMemory, without updates
 BUFFER_CAPACITY = 100_000   #replaybuffer
 BATCH_SIZE = 1024           #replaybuffer
@@ -77,8 +77,8 @@ optims = {
 
 schedulers = { #should half the lr after 138629 steps
     agent: {
-        'critic_net': torch.optim.lr_scheduler.ExponentialLR(optims[agent]['critic_net'], gamma=0.999),
-        'actor_net': torch.optim.lr_scheduler.ExponentialLR(optims[agent]['actor_net'], gamma=0.999)
+        'critic_net': torch.optim.lr_scheduler.ExponentialLR(optims[agent]['critic_net'], gamma=0.9999),
+        'actor_net': torch.optim.lr_scheduler.ExponentialLR(optims[agent]['actor_net'], gamma=0.9999)
     }
     for agent in all_agents
 }
@@ -120,18 +120,15 @@ for episode in range(START_EPISODE + 1,N_EPISODES):
     #AGENT ITERATION
     for agent in env.agent_iter(): #TODO: MAKE IT PARALLEL!
         observation, reward, termination, truncation, info = env.last()
-        reward/=500 #normalization of the reward for stability (could be wrong)
-        '''
-        During my experiments, I noticed that the reward is never > 500 or < -500. Clipping is performed just in case 
-        something goes very wrong.
-        '''
-        reward = np.clip(reward,-1,1)
+
         if termination or truncation:
             action = None
         else:
             with torch.no_grad():
-                if (len(memory) < WARMUP and START_EPISODE == 0) or (episode % 10 == 0):
+                if (len(memory) < WARMUP and START_EPISODE == 0) or (episode % 7 == 0):
                     action = env.action_space(agent).sample() #old random policy provided by the example
+                    action += ou_noise[agent].sample()
+                    action = np.clip(action, -1, 1)
                 else:
                     all_nets[agent]['actor_net'].eval()
                     action = all_nets[agent]['actor_net'](torch.tensor(observation, dtype=torch.float32).unsqueeze(0)).squeeze(0).cpu().numpy()
@@ -147,41 +144,45 @@ for episode in range(START_EPISODE + 1,N_EPISODES):
             observation = np.zeros(OBSERVATION_SIZE)
         if cache[agent]['observation'] is not None:
             memory.push(
-                agent,
-                cache[agent]['observation'],
-                observation,
-                cache[agent]['action'],
-                cache[agent]['reward'],
-                cache[agent]['termination'],
-                cache[agent]['truncation'],
-                cache[agent]['info'])
+                agent = agent,
+                observation = cache[agent]['observation'],
+                new_observation = observation,
+                action = cache[agent]['action'],
+                reward = cache[agent]['reward'],
+                termination = cache[agent]['termination'],
+                truncation = cache[agent]['truncation'],
+                info = cache[agent]['info'])
         cache[agent]['observation'] = observation
         cache[agent]['action'] = action
         cache[agent]['reward'] = reward
         cache[agent]['termination'] = termination
         cache[agent]['truncation'] = truncation
         cache[agent]['info'] = info
-        batch = None
 
         #UPDATE PART
         if len(memory) > WARMUP:
             batch = memory.sample(agent)
+
+            # CRITIC PART
             if is_training_critic == 0:
                 is_training_critic = 1
                 print('starting critic training')
-
-            #CRITIC PART
             train_critic(batch, all_nets[agent], optims[agent]['critic_net'],schedulers[agent])
             soft_update(all_nets[agent]['critic_net_target'], all_nets[agent]['critic_net'])
-
-        if len(memory) > 2 * WARMUP:
-            if is_training_actor == 0:
-                is_training_actor = 1
-                print('starting actor training')
-            #ACTOR PART
-            train_actor(batch, all_nets[agent], optims[agent]['actor_net'],schedulers[agent])
-            soft_update(all_nets[agent]['actor_net_target'], all_nets[agent]['actor_net'])
-
+            
+            # ACTOR PART
+            if (episode + 1) % 3 == 0: 
+                if is_training_actor == 0:
+                    is_training_actor = 1
+                    print('starting actor training')
+                #ACTOR PART
+                train_actor(batch, all_nets[agent], optims[agent]['actor_net'],schedulers[agent])
+                soft_update(all_nets[agent]['actor_net_target'], all_nets[agent]['actor_net'])
+    if (episode + 1)% 100 == 0:
+        for _ , scheds in schedulers.items():
+            scheds['critic_net'].step()
+            scheds['actor_net'].step()
+        
 
     if (episode + 1)% SAVE_FREQ == 0: #saving the checkpoints
         for file in os.listdir(WEIGHTS_ABS_PATH):
@@ -189,10 +190,5 @@ for episode in range(START_EPISODE + 1,N_EPISODES):
         save_models_and_optimizers(all_nets, optims, episode,path=WEIGHTS_ABS_PATH)
         print(f"lr_critic-->{optims['walker_0']['critic_net']}")
         print(f"lr_actor-->{optims['walker_0']['actor_net']}")
-        
-    if len(memory) > 2 * WARMUP:
-        
-        for agent, scheds in schedulers.items():
-            scheds['critic_net'].step()
-            scheds['actor_net'].step()
     env.close()
+    print(episode_rewards)
